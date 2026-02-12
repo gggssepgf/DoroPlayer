@@ -1,0 +1,58 @@
+syntax = "proto3";
+package handyplug;
+
+option java_package = "com.example.funplayer.handyplug";
+option java_outer_classname = "Handyplug";
+
+message Ok {
+    uint32 Id = 1;
+}
+
+message Error {
+    uint32 Id = 1;
+    string ErrorMessage = 2;
+    int32 ErrorCode = 3;
+}
+
+message Ping {
+    uint32 Id = 1;
+}
+
+message RequestServerInfo {
+    uint32 Id = 1;
+    string ClientName = 2;
+    uint32 MessageVersion = 3;
+}
+
+message ServerInfo {
+    uint32 Id = 1;
+    string ServerName = 2;
+    uint32 MessageVersion = 3;
+    uint32 MaxPingTime = 4;
+}
+
+message LinearCmd {
+    uint32 Id = 1;
+    uint32 DeviceIndex = 2;
+    message Vector {
+        uint32 Index = 1;
+        uint32 Duration = 2;
+        double Position = 3;
+    }
+    repeated Vector Vectors = 3;
+}
+
+message HandyMessage {
+    oneof Message {
+        Ok Ok = 100;
+        Error Error = 101;
+        Ping Ping = 102;
+        RequestServerInfo RequestServerInfo = 200;
+        ServerInfo ServerInfo = 201;
+        LinearCmd LinearCmd = 403;
+    }
+}
+
+message Payload {
+    repeated HandyMessage Messages = 1;
+}
