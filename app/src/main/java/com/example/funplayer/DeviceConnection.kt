@@ -3,7 +3,6 @@ package com.example.funplayer
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothAdapter.LeScanCallback
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
@@ -14,11 +13,13 @@ import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothSocket
 import android.hardware.usb.UsbManager
 import android.os.Build
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.example.funplayer.handyplug.Handyplug
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
@@ -37,34 +38,165 @@ internal fun sendUdpMessage(host: String, port: Int, message: String): Boolean {
     }
 }
 
-internal fun sendTcpMessage(host: String, port: Int, message: String): Boolean {
-    if (message.isEmpty()) return true
-    return try {
-        java.net.Socket(host, port).use { socket ->
-            socket.getOutputStream().use { os ->
-                os.write(message.toByteArray(Charsets.UTF_8))
-                os.flush()
+/**
+ * TCP 连接池，用于维护长连接
+ */
+internal object TcpConnectionPool {
+    private data class ConnectionKey(val host: String, val port: Int)
+
+    private data class PooledConnection(
+        val socket: java.net.Socket,
+        val outputStream: java.io.OutputStream,
+        var lastUsed: Long = System.currentTimeMillis()
+    )
+
+    private val connections = mutableMapOf<ConnectionKey, PooledConnection>()
+    private val lock = Any()
+
+    /**
+     * 发送 TCP 消息，使用连接池保持长连接
+     */
+    fun sendMessage(host: String, port: Int, message: String): Boolean {
+        if (message.isEmpty()) return true
+        return sendBytes(host, port, message.toByteArray(Charsets.UTF_8))
+    }
+
+    /**
+     * 发送 TCP 字节数组，使用连接池保持长连接
+     */
+    fun sendBytes(host: String, port: Int, bytes: ByteArray): Boolean {
+        if (bytes.isEmpty()) return true
+
+        val key = ConnectionKey(host, port)
+
+        synchronized(lock) {
+            try {
+                // 获取或创建连接
+                val conn = getOrCreateConnection(key)
+
+                // 检查连接是否仍然有效
+                if (conn.socket.isClosed || !conn.socket.isConnected || conn.socket.isOutputShutdown) {
+                    // 连接已失效，移除并重新创建
+                    removeConnection(key)
+                    val newConn = createConnection(host, port) ?: return false
+                    connections[key] = newConn
+                    newConn.outputStream.write(bytes)
+                    newConn.outputStream.flush()
+                    newConn.lastUsed = System.currentTimeMillis()
+                    return true
+                }
+
+                // 发送数据
+                conn.outputStream.write(bytes)
+                conn.outputStream.flush()
+                conn.lastUsed = System.currentTimeMillis()
+                return true
+
+            } catch (e: Exception) {
+                DevLog.log("TCP", "发送失败: ${e.message}")
+                // 发生错误时移除连接
+                removeConnection(key)
+                return false
             }
         }
-        true
-    } catch (_: Exception) {
-        false
+    }
+
+    /**
+     * 获取或创建连接
+     */
+    private fun getOrCreateConnection(key: ConnectionKey): PooledConnection {
+        val existing = connections[key]
+        if (existing != null && !existing.socket.isClosed && existing.socket.isConnected) {
+            return existing
+        }
+
+        // 创建新连接
+        val newConn = createConnection(key.host, key.port) ?: throw Exception("无法创建 TCP 连接")
+        connections[key] = newConn
+        return newConn
+    }
+
+    /**
+     * 创建新的 TCP 连接
+     */
+    private fun createConnection(host: String, port: Int): PooledConnection? {
+        return try {
+            DevLog.log("TCP", "创建新连接: $host:$port")
+            val socket = java.net.Socket()
+            // 设置连接超时和读写超时
+            socket.connect(java.net.InetSocketAddress(host, port), 5000)
+            socket.soTimeout = 10000
+            socket.tcpNoDelay = true
+            socket.keepAlive = true
+
+            val outputStream = socket.getOutputStream()
+            PooledConnection(socket, outputStream)
+        } catch (e: Exception) {
+            DevLog.log("TCP", "连接失败: $host:$port, ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 移除并关闭连接
+     */
+    private fun removeConnection(key: ConnectionKey) {
+        val conn = connections.remove(key)
+        if (conn != null) {
+            try {
+                conn.outputStream.close()
+            } catch (_: Exception) { }
+            try {
+                conn.socket.close()
+            } catch (_: Exception) { }
+        }
+    }
+
+    /**
+     * 关闭所有连接
+     */
+    fun closeAll() {
+        synchronized(lock) {
+            connections.keys.toList().forEach { key ->
+                removeConnection(key)
+            }
+        }
+    }
+
+    /**
+     * 关闭特定连接
+     */
+    fun close(host: String, port: Int) {
+        val key = ConnectionKey(host, port)
+        synchronized(lock) {
+            removeConnection(key)
+        }
+    }
+
+    /**
+     * 清理超过指定时间未使用的连接
+     */
+    fun cleanup(idleTimeoutMs: Long = 60000) {
+        val now = System.currentTimeMillis()
+        synchronized(lock) {
+            connections.keys.toList().forEach { key ->
+                val conn = connections[key]
+                if (conn != null && (now - conn.lastUsed) > idleTimeoutMs) {
+                    DevLog.log("TCP", "清理闲置连接: ${key.host}:${key.port}")
+                    removeConnection(key)
+                }
+            }
+        }
     }
 }
 
+// 兼容旧接口
+internal fun sendTcpMessage(host: String, port: Int, message: String): Boolean {
+    return TcpConnectionPool.sendMessage(host, port, message)
+}
+
 internal fun sendTcpBytes(host: String, port: Int, bytes: ByteArray): Boolean {
-    if (bytes.isEmpty()) return true
-    return try {
-        java.net.Socket(host, port).use { socket ->
-            socket.getOutputStream().use { os ->
-                os.write(bytes)
-                os.flush()
-            }
-        }
-        true
-    } catch (_: Exception) {
-        false
-    }
+    return TcpConnectionPool.sendBytes(host, port, bytes)
 }
 
 internal fun buildHandyTestPayload(): ByteArray {
@@ -147,17 +279,31 @@ internal object HandyBleClient {
     private var pendingWrite: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
     private var negotiatedMtu: Int = 23
 
+    // 连接状态管理：null=未连接, Deferred=正在连接
+    private var pendingConnection: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+
+    // 连接就绪标志：只有在成功获取TX特征值后才为true
+    @Volatile
+    private var isConnectionReady: Boolean = false
+
     private fun hasPermission(context: android.content.Context, permission: String): Boolean {
         return ContextCompat.checkSelfPermission(context, permission) == android.content.pm.PackageManager.PERMISSION_GRANTED
     }
 
     private fun closeInternal() {
-        try { gatt?.close() } catch (_: Exception) { }
+        try {
+            gatt?.disconnect()
+        } catch (_: Exception) { }
+        try {
+            gatt?.close()
+        } catch (_: Exception) { }
         gatt = null
         txCharacteristic = null
         connectedAddress = null
         pendingWrite = null
         negotiatedMtu = 23
+        pendingConnection = null
+        isConnectionReady = false
     }
 
     suspend fun write(context: android.content.Context, address: String, payload: ByteArray, useWriteWithResponse: Boolean = true): Boolean {
@@ -169,9 +315,36 @@ internal object HandyBleClient {
             DevLog.log("Handy", "连接失败: 缺少 BLUETOOTH_CONNECT 权限")
             return false
         }
-        val forJoyPlay = !useWriteWithResponse
-        val ok = ensureConnected(context, address, forJoyPlay)
+
+        // 如果正在连接中，直接返回false，不响应写入
+        if (pendingConnection != null) {
+            DevLog.log("Handy", "连接正在进行中，暂不响应写入请求")
+            return false
+        }
+
+        // 检查是否已连接且就绪（只有在获取到TX特征值后才认为连接就绪）
+        if (isConnectionReady && gatt != null && txCharacteristic != null && connectedAddress == address) {
+            val g = gatt
+            val ch = txCharacteristic
+            if (g != null && ch != null) {
+                if (useWriteWithResponse) kotlinx.coroutines.delay(150L)
+                val written = writeChunked(g, ch, payload, useWriteWithResponse)
+                if (!written) DevLog.log("Handy", "写入失败: 未完成或超时")
+                return written
+            }
+        }
+
+        // 触发新的连接
+        val forTcodeBLE = !useWriteWithResponse
+        val connectionDeferred = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        pendingConnection = connectionDeferred
+
+        val ok = connectOnce(context, address, forTcodeBLE)
+        connectionDeferred.complete(ok)
+        pendingConnection = null
+
         if (!ok) return false
+
         val g = gatt
         val ch = txCharacteristic
         if (g == null || ch == null) {
@@ -184,8 +357,7 @@ internal object HandyBleClient {
         return written
     }
 
-    private suspend fun ensureConnected(context: android.content.Context, address: String, forJoyPlay: Boolean = false): Boolean {
-        if (gatt != null && txCharacteristic != null && connectedAddress == address) return true
+    private suspend fun connectOnce(context: android.content.Context, address: String, forTcodeBLE: Boolean = false): Boolean {
         closeInternal()
 
         val manager = context.getSystemService(android.content.Context.BLUETOOTH_SERVICE) as? BluetoothManager
@@ -205,126 +377,152 @@ internal object HandyBleClient {
             return false
         }
 
-        suspend fun tryConnect(autoConnect: Boolean): Boolean? {
-            return withTimeoutOrNull(25_000L) {
-                kotlinx.coroutines.suspendCancellableCoroutine<Boolean> { cont ->
-                    val callback = object : BluetoothGattCallback() {
-                        private var finished = false
+        return withTimeoutOrNull(30_000L) {
+            kotlinx.coroutines.suspendCancellableCoroutine<Boolean> { cont ->
+                val callback = object : BluetoothGattCallback() {
+                    private var finished = false
 
-                        private fun finish(value: Boolean) {
-                            if (finished) return
-                            finished = true
-                            cont.resume(value)
-                        }
+                    private fun finish(value: Boolean) {
+                        if (finished) return
+                        finished = true
+                        cont.resume(value)
+                    }
 
-                        override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
-                            if (status != BluetoothGatt.GATT_SUCCESS) {
-                                DevLog.log("Handy", "连接失败: onConnectionStateChange status=$status (非 GATT_SUCCESS)")
-                                closeInternal()
-                                finish(false)
+                    override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+                        if (newState == BluetoothProfile.STATE_CONNECTED) {
+                            if (status != BluetoothGatt.GATT_SUCCESS && status != 257 && status != 133) {
+                                DevLog.log("Handy", "连接成功但 status=$status (已忽略)")
+                            }
+                            val res = g.requestMtu(200)
+                            DevLog.log("HANDY","requestMtu called: $res")
+                        } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                            if (status == 257 || status == 133) {
+                                DevLog.log("Handy", "收到状态断开回调 (status=$status)，忽略此假性断开")
                                 return
                             }
-                            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                                try { g.requestMtu(247) } catch (_: Exception) { }
-                                g.discoverServices()
-                            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                                if (finished) DevLog.log("Handy", "BLE 连接已断开，下次发送将自动重连")
-                                else DevLog.log("Handy", "连接断开: STATE_DISCONNECTED")
-                                closeInternal()
-                                finish(false)
-                            }
-                        }
-
-                        override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-                            if (status != BluetoothGatt.GATT_SUCCESS) {
-                                DevLog.log("Handy", "连接失败: onServicesDiscovered status=$status (非 GATT_SUCCESS)")
-                                closeInternal()
-                                finish(false)
-                                return
-                            }
-                            val service: BluetoothGattService? = g.getService(HANDY_SERVICE_UUID)
-                            val ch: BluetoothGattCharacteristic? = service?.getCharacteristic(HANDY_CHARACTERISTIC_UUID)
-                            if (ch == null) {
-                                DevLog.log("Handy", "连接失败: 未找到 Handy 服务或特征 UUID")
-                                closeInternal()
-                                finish(false)
-                                return
-                            }
-                            txCharacteristic = ch
-                            finish(true)
-                        }
-
-                        override fun onCharacteristicWrite(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-                            if (status != BluetoothGatt.GATT_SUCCESS) {
-                                DevLog.log("Handy", "写入回调: status=$status (非 GATT_SUCCESS)")
-                            }
-                            pendingWrite?.complete(status == BluetoothGatt.GATT_SUCCESS)
-                            pendingWrite = null
+                            DevLog.log("Handy", "连接断开: status=$status")
+                            if (finished) DevLog.log("Handy", "BLE 连接已断开，下次发送将自动重连")
+                            else DevLog.log("Handy", "连接失败: STATE_DISCONNECTED")
+                            closeInternal()
+                            finish(false)
                         }
                     }
 
-                    val g = if (forJoyPlay) {
-                        device.connectGatt(context, autoConnect, callback)
-                    } else if (Build.VERSION.SDK_INT >= 23) {
-                        device.connectGatt(context, autoConnect, callback, BluetoothDevice.TRANSPORT_LE)
-                    } else {
-                        device.connectGatt(context, autoConnect, callback)
-                    }
-                    gatt = g
-                    connectedAddress = address
+                    override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+                        if (status != BluetoothGatt.GATT_SUCCESS) {
+                            DevLog.log("Handy", "onServicesDiscovered status=$status (非 GATT_SUCCESS)")
+                        }
 
-                    cont.invokeOnCancellation {
-                        closeInternal()
+                        val service: BluetoothGattService? = g.getService(HANDY_SERVICE_UUID)
+                        val ch: BluetoothGattCharacteristic? = service?.getCharacteristic(HANDY_CHARACTERISTIC_UUID)
+                        if (ch == null) {
+                            DevLog.log("Handy", "连接失败: 未找到 Handy 服务或特征 UUID")
+                            closeInternal()
+                            finish(false)
+                            return
+                        } else {
+                            DevLog.log("Handy", "成功获取TX特征值")
+                        }
+                        txCharacteristic = ch
+
+                        val res = g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                        DevLog.log("HANDY","requestConnectionPriority: $res")
+
+                        // 标记连接就绪，允许写入
+                        isConnectionReady = true
+                        DevLog.log("Handy", "连接就绪，可以开始写入")
+
+                        finish(true)
+                    }
+
+                    override fun onCharacteristicWrite(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+                        if (status != BluetoothGatt.GATT_SUCCESS) {
+                            DevLog.log("Handy", "写入回调: status=$status (非 GATT_SUCCESS)")
+                        }
+                        pendingWrite?.complete(status == BluetoothGatt.GATT_SUCCESS)
+                        pendingWrite = null
+                    }
+
+                    override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+                        if (status == BluetoothGatt.GATT_SUCCESS) {
+                            negotiatedMtu = mtu
+                            DevLog.log("Handy", "MTU 协商成功: $mtu")
+                        } else {
+                            DevLog.log("Handy", "MTU 协商失败: status=$status, 使用默认 23")
+                        }
+
+                        g.setPreferredPhy(
+                            BluetoothDevice.PHY_LE_1M_MASK,  // TX 首选1M
+                            BluetoothDevice.PHY_LE_1M_MASK,  // RX 首选1M
+                            BluetoothDevice.PHY_OPTION_NO_PREFERRED
+                        )
+                        g.discoverServices()
                     }
                 }
-            }
-        }
 
-        var result = tryConnect(autoConnect = false)
-        if (result != true) {
-            DevLog.log("Handy", "首次连接未成功，关闭后重试一次(直连)")
-            closeInternal()
-            kotlinx.coroutines.delay(500L)
-            result = tryConnect(autoConnect = false)
-        }
-        if (result != true) {
-            DevLog.log("Handy", "直连两次未成，尝试后台连接(autoConnect=true)")
-            closeInternal()
-            kotlinx.coroutines.delay(300L)
-            result = tryConnect(autoConnect = true)
-        }
-        if (result != true) {
-            DevLog.log("Handy", "连接失败: 连接超时(25s)或未完成，已尝试直连与后台连接")
-        }
-        return result == true
+                val g = if (forTcodeBLE) {
+                    device.connectGatt(context, false, callback)
+                } else if (Build.VERSION.SDK_INT >= 23) {
+                    device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
+                } else {
+                    device.connectGatt(context, false, callback)
+                }
+                gatt = g
+                connectedAddress = address
+
+                cont.invokeOnCancellation {
+                    closeInternal()
+                }
+            }
+        } ?: false
     }
 
     private suspend fun writeChunked(g: BluetoothGatt, ch: BluetoothGattCharacteristic, payload: ByteArray, useWriteWithResponse: Boolean): Boolean {
         if (!useWriteWithResponse) return writeOnceNoResponseEciotStyle(g, ch, payload)
-        suspend fun tryWriteNoRsp(data: ByteArray, index: Int): Boolean {
-            var delayMs = 80L
-            repeat(4) { attempt ->
-                if (attempt > 0) kotlinx.coroutines.delay(delayMs).also { delayMs = (delayMs * 2).coerceAtMost(400L) }
-                if (writeOnceNoResponse(g, ch, data, index)) return true
+
+        // 打印实际发送的内容
+        DevLog.log("Handy", "准备发送: ${payload.size} 字节，分块大小: 20 字节")
+
+        // 计算可用 MTU（MTU - 3，3字节为协议头）
+        // 使用协商后的 MTU，默认 23-3=20，如果协商成功则更大
+        val availableMtu = negotiatedMtu - 3
+        val chunkSize = availableMtu.coerceAtLeast(20)
+
+        // 分块发送
+        val totalChunks = (payload.size + chunkSize - 1) / chunkSize
+        DevLog.log("Handy", "分为 $totalChunks 块，每块最大 $chunkSize 字节")
+
+        for (i in 0 until totalChunks) {
+            val start = i * chunkSize
+            val end = minOf(start + chunkSize, payload.size)
+            val chunk = payload.copyOfRange(start, end)
+            val success = writeOnceWithResponse(g, ch, chunk, i + 1)
+            if (!success) {
+                DevLog.log("Handy", "第 ${i + 1}/$totalChunks 块发送失败")
+                return false
             }
-            return false
         }
-        if (writeOnceWithResponse(g, ch, payload, 1)) return true
-        return tryWriteNoRsp(payload, 1)
+
+        DevLog.log("Handy", "所有 $totalChunks 块发送成功")
+        return true
     }
 
     private fun writeOnceNoResponseEciotStyle(g: BluetoothGatt, ch: BluetoothGattCharacteristic, bytes: ByteArray): Boolean {
+        DevLog.log("Handy", "准备发送2: ${bytes.size} 字节")
+
         ch.value = bytes
         ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         return try {
             g.writeCharacteristic(ch)
         } catch (e: Exception) {
-            DevLog.log("Handy", "写入失败(JoyPlay/eciot): ${e.message}")
+            DevLog.log("Handy", "写入失败(TcodeBLE/eciot): ${e.message}")
             false
         }
     }
 
     private suspend fun writeOnceWithResponse(g: BluetoothGatt, ch: BluetoothGattCharacteristic, bytes: ByteArray, chunkIndex: Int = 0): Boolean {
+//        DevLog.log("Handy", "准备发送3: ${bytes.size} 字节")
+
         ch.value = bytes
         ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         val started = try { g.writeCharacteristic(ch) } catch (e: Exception) {
@@ -340,6 +538,8 @@ internal object HandyBleClient {
     }
 
     private suspend fun writeOnceNoResponse(g: BluetoothGatt, ch: BluetoothGattCharacteristic, bytes: ByteArray, chunkIndex: Int = 0): Boolean {
+//        DevLog.log("Handy", "准备发送4: ${bytes.size} 字节")
+
         ch.value = bytes
         ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         val started = try { g.writeCharacteristic(ch) } catch (e: Exception) {
@@ -395,7 +595,7 @@ internal suspend fun sendConnectionTest(context: android.content.Context): Boole
     val connType = getConnectionType(context)
     if (connType != ConnectionType.UDP && connType != ConnectionType.TCP &&
         connType != ConnectionType.Serial && connType != ConnectionType.BluetoothSerial &&
-        connType != ConnectionType.TheHandy && connType != ConnectionType.JoyPlay) return false
+        connType != ConnectionType.TheHandy && connType != ConnectionType.TcodeBLE) return false
     return when (connType) {
         ConnectionType.UDP -> {
             val prefix = getSendFormatPrefix(context)
@@ -421,11 +621,11 @@ internal suspend fun sendConnectionTest(context: android.content.Context): Boole
             val payload = buildHandyTestPayload()
             HandyBleClient.write(context, getHandyDeviceAddress(context), payload)
         }
-        ConnectionType.JoyPlay -> {
+        ConnectionType.TcodeBLE -> {
             val prefix = getSendFormatPrefix(context)
             val suffix = getSendFormatSuffix(context)
             val message = prefix + CONNECTION_TEST_MESSAGE + suffix
-            HandyBleClient.write(context, getJoyPlayDeviceAddress(context), message.toByteArray(Charsets.UTF_8), useWriteWithResponse = false)
+            HandyBleClient.write(context, getTcodeBLEDeviceAddress(context), message.toByteArray(Charsets.UTF_8), useWriteWithResponse = false)
         }
         else -> false
     }
@@ -436,7 +636,7 @@ internal suspend fun sendAxisCommand(context: android.content.Context, axisComma
     val connType = getConnectionType(context)
     if (connType != ConnectionType.UDP && connType != ConnectionType.TCP &&
         connType != ConnectionType.Serial && connType != ConnectionType.BluetoothSerial &&
-        connType != ConnectionType.TheHandy && connType != ConnectionType.JoyPlay
+        connType != ConnectionType.TheHandy && connType != ConnectionType.TcodeBLE
     ) return false
     return withContext(Dispatchers.IO) {
         when (connType) {
@@ -472,11 +672,11 @@ internal suspend fun sendAxisCommand(context: android.content.Context, axisComma
                 val payload = buildHandyLinearPayloadFromPosition(context, axisId, position, dur.toInt())
                 if (payload != null) HandyBleClient.write(context, getHandyDeviceAddress(context), payload) else false
             }
-            ConnectionType.JoyPlay -> {
+            ConnectionType.TcodeBLE -> {
                 val prefix = getSendFormatPrefix(context)
                 val suffix = getSendFormatSuffix(context)
                 val message = prefix + axisCommand + suffix
-                HandyBleClient.write(context, getJoyPlayDeviceAddress(context), message.toByteArray(Charsets.UTF_8), useWriteWithResponse = false)
+                HandyBleClient.write(context, getTcodeBLEDeviceAddress(context), message.toByteArray(Charsets.UTF_8), useWriteWithResponse = false)
             }
             else -> false
         }

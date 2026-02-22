@@ -21,7 +21,7 @@ internal enum class ConnectionType(@StringRes val nameResId: Int) {
     TCP(R.string.tcp_connection),
     UDP(R.string.udp_connection),
     TheHandy(R.string.handy_connection),
-    JoyPlay(R.string.joyplay_connection)
+    TcodeBLE(R.string.TcodeBLE)
 }
 
 data class VideoItem(

@@ -95,9 +95,9 @@ internal fun getHandyDeviceAddress(context: android.content.Context): String =
     context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
         .getString(KEY_HANDY_DEVICE_ADDRESS, "") ?: ""
 
-internal fun getJoyPlayDeviceAddress(context: android.content.Context): String =
+internal fun getTcodeBLEDeviceAddress(context: android.content.Context): String =
     context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
-        .getString(KEY_JOYPLAY_DEVICE_ADDRESS, "") ?: ""
+        .getString(KEY_TCODEBLE_DEVICE_ADDRESS, "") ?: ""
 
 internal fun getBtSerialDeviceAddress(context: android.content.Context): String =
     context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
@@ -125,7 +125,7 @@ internal fun saveConnectionSettings(
     handyDeviceAddress: String = "",
     handyKey: String = "",
     handyAxis: String = "L0",
-    joyPlayDeviceAddress: String = ""
+    tcodeBLEDeviceAddress: String = ""
 ) {
     context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE).edit()
         .putBoolean(KEY_CONNECTION_ENABLED, connectionEnabled)
@@ -140,7 +140,7 @@ internal fun saveConnectionSettings(
         .putString(KEY_HANDY_DEVICE_ADDRESS, handyDeviceAddress)
         .putString(KEY_HANDY_KEY, handyKey)
         .putString(KEY_HANDY_AXIS, handyAxis)
-        .putString(KEY_JOYPLAY_DEVICE_ADDRESS, joyPlayDeviceAddress)
+        .putString(KEY_TCODEBLE_DEVICE_ADDRESS, tcodeBLEDeviceAddress)
         .apply()
 }
 

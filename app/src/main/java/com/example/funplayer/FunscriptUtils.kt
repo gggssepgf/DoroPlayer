@@ -126,7 +126,7 @@ internal fun buildAxisCommandFromScript(
     val defaultRanges = script.axes.associate { it.id to (0f to 100f) }
     val ranges = defaultRanges + savedRanges
     val sb = StringBuilder()
-    for (axis in script.axes) {
+    for ((index, axis) in script.axes.withIndex()) {
         val next = axis.actions.firstOrNull { it.at >= currentPositionMs } ?: continue
         val (minR, maxR) = ranges[axis.id] ?: (0f to 100f)
         val posClamped = next.pos.coerceIn(0, 100)
@@ -134,6 +134,7 @@ internal fun buildAxisCommandFromScript(
         val mappedFloat = minR + t * (maxR - minR)
         val mapped = kotlin.math.round(mappedFloat).toInt().coerceIn(0, 100)
         val durationMs = (next.at - currentPositionMs).coerceIn(1L, 60_000L)
+        if (index > 0) sb.append(' ')
         sb.append(axis.id).append(mapped).append('I').append(durationMs)
     }
     return sb.toString()
@@ -167,12 +168,15 @@ internal fun buildAxisCommandFromPositions(
     val ranges = getAxisRanges(context)
     val sb = StringBuilder()
     val dur = durationMs.coerceIn(1L, 60_000L)
+    var index = 0
     for (axisId in AXIS_NAMES) {
         val posRaw = positions[axisId] ?: continue
         val (minR, maxR) = ranges[axisId] ?: (0f to 100f)
         val t = (posRaw.coerceIn(0, 100) / 100f)
         val mapped = kotlin.math.round(minR + t * (maxR - minR)).toInt().coerceIn(0, 100)
+        if (index > 0) sb.append(' ')
         sb.append(axisId).append(mapped).append('I').append(dur)
+        index++
     }
     return sb.toString()
 }
