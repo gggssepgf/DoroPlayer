@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -33,6 +34,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -103,6 +105,9 @@ private fun AppSettingsScreenImpl(
     var showNasFolderBrowser by remember { mutableStateOf(false) }
     var nasSettingsExpanded by remember { mutableStateOf(true) }
     var nasTestInProgress by remember { mutableStateOf(false) }
+    var nasDiscoveryInProgress by remember { mutableStateOf(false) }
+    var showNasDiscoveryDialog by remember { mutableStateOf(false) }
+    var discoveredSmbDevices by remember { mutableStateOf<List<SMBDiscoverer.SmbDevice>>(emptyList()) }
 
     var showDeveloperPasswordDialog by remember { mutableStateOf(false) }
     var developerPasswordInput by remember { mutableStateOf("") }
@@ -324,7 +329,7 @@ private fun AppSettingsScreenImpl(
                             port = nasPortStr.toIntOrNull() ?: 445,
                             initialSubpath = nasSubpath.trim(),
                             onDismiss = { showNasFolderBrowser = false },
-                            onSelect = { path ->
+                            onSelect = { path: String ->
                                 nasSubpath = path
                                 showNasFolderBrowser = false
                                 if (nasHost.isNotBlank() && nasShare.isNotBlank()) {
@@ -351,6 +356,36 @@ private fun AppSettingsScreenImpl(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
                             onClick = {
+                                showNasDiscoveryDialog = true
+                                nasDiscoveryInProgress = true
+                                scope.launch {
+                                    val discoverer = SMBDiscoverer(context)
+                                    val result = discoverer.discoverSmbDevices(
+                                        timeoutMs = 8000,
+                                        scanLocalNetwork = true  // 先使用 SSDP，更快
+                                    )
+                                    result.fold(
+                                        onSuccess = { devices ->
+                                            discoveredSmbDevices = devices
+                                        },
+                                        onFailure = { error ->
+                                            Toast.makeText(
+                                                context,
+                                                context.getString(R.string.nas_discovery_failed) + ": ${error.message}",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                            discoveredSmbDevices = emptyList()
+                                        }
+                                    )
+                                    nasDiscoveryInProgress = false
+                                }
+                            },
+                            enabled = !nasDiscoveryInProgress
+                        ) {
+                            Text(if (nasDiscoveryInProgress) stringResource(R.string.nas_discovering) else stringResource(R.string.nas_discovery))
+                        }
+                        OutlinedButton(
+                            onClick = {
                                 if (nasTestInProgress || nasHost.isBlank() || nasShare.isBlank()) return@OutlinedButton
                                 nasTestInProgress = true
                                 scope.launch {
@@ -367,7 +402,7 @@ private fun AppSettingsScreenImpl(
                                     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                 }
                             },
-                            enabled = !nasTestInProgress && nasHost.isNotBlank() && nasShare.isNotBlank()
+                            enabled = !nasTestInProgress && !nasDiscoveryInProgress && nasHost.isNotBlank() && nasShare.isNotBlank()
                         ) {
                             Text(if (nasTestInProgress) stringResource(R.string.scanning) else stringResource(R.string.nas_connection_test))
                         }
@@ -394,7 +429,7 @@ private fun AppSettingsScreenImpl(
                                     ).show()
                                 }
                             },
-                            enabled = !isScanning && nasHost.isNotBlank() && nasShare.isNotBlank()
+                            enabled = !isScanning && !nasDiscoveryInProgress && nasHost.isNotBlank() && nasShare.isNotBlank()
                         ) {
                             Text(if (isScanning) stringResource(R.string.scanning) else stringResource(R.string.nas_scan_folder))
                         }
@@ -565,6 +600,117 @@ private fun AppSettingsScreenImpl(
             }
         )
     }
+
+    if (showNasDiscoveryDialog) {
+        NasDiscoveryDialog(
+            devices = discoveredSmbDevices,
+            isLoading = nasDiscoveryInProgress,
+            onDismiss = { showNasDiscoveryDialog = false },
+            onDeviceSelected = { device: SMBDiscoverer.SmbDevice ->
+                nasHost = device.address
+                showNasDiscoveryDialog = false
+                // 可选：如果用户提供了凭据，可以尝试自动获取共享列表
+                if (nasUser.isNotBlank() && nasPassword.isNotBlank()) {
+                    scope.launch {
+                        val discoverer = SMBDiscoverer(context)
+                        val sharesResult = discoverer.verifySmbDevice(
+                            device = device,
+                            user = nasUser.trim(),
+                            password = nasPassword,
+                            port = nasPortStr.toIntOrNull() ?: 445
+                        )
+                        sharesResult.fold(
+                            onSuccess = { shares ->
+                                if (shares.size == 1) {
+                                    nasShare = shares.first()
+                                }
+                            },
+                            onFailure = {
+                                // 静默失败，用户仍需手动输入共享名
+                            }
+                        )
+                    }
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun NasDiscoveryDialog(
+    devices: List<SMBDiscoverer.SmbDevice>,
+    isLoading: Boolean,
+    onDismiss: () -> Unit,
+    onDeviceSelected: (SMBDiscoverer.SmbDevice) -> Unit
+) {
+    val context = LocalContext.current
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.nas_select_device)) },
+        text = {
+            Column(modifier = Modifier.widthIn(max = 400.dp)) {
+                when {
+                    isLoading -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(stringResource(R.string.nas_discovering))
+                        }
+                    }
+                    devices.isEmpty() -> {
+                        Text(
+                            stringResource(R.string.nas_no_devices_found),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    else -> {
+                        val deviceCount = devices.count()
+                        Text(
+                            stringResource(R.string.nas_devices_found_format, deviceCount),
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                        LazyColumn(
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.heightIn(max = 300.dp)
+                        ) {
+                            items(devices) { device ->
+                                OutlinedButton(
+                                    onClick = { onDeviceSelected(device) },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.fillMaxWidth()) {
+                                        Text(
+                                            device.displayName,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (device.name != null && device.name != device.address) {
+                                            Text(
+                                                device.address,
+                                                fontSize = 12.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.cancel))
+            }
+        }
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

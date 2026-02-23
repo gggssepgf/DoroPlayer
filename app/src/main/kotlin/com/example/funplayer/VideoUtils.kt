@@ -39,7 +39,8 @@ internal fun loadVideoFirstFrame(context: android.content.Context, uriString: St
     val retriever = MediaMetadataRetriever()
     return try {
         if (uriString.startsWith("smb:", ignoreCase = true)) {
-            val tempFile = copySmbToTempFile(uriString)
+            // 对于封面/元数据，只需要下载视频头部（3MB 足够）
+            val tempFile = copySmbToTempFile(uriString, maxBytes = SMB_METADATA_COPY_LIMIT)
             if (tempFile == null) return null
             try {
                 retriever.setDataSource(tempFile.absolutePath)
@@ -77,7 +78,8 @@ internal fun getVideoDurationFormattedFromUri(context: android.content.Context, 
     val retriever = MediaMetadataRetriever()
     return try {
         val result = if (uriString.startsWith("smb:", ignoreCase = true)) {
-            val tempFile = copySmbToTempFile(uriString)
+            // 对于时长提取，只需要下载视频头部（3MB 足够）
+            val tempFile = copySmbToTempFile(uriString, maxBytes = SMB_METADATA_COPY_LIMIT)
             if (tempFile == null) return "0:00"
             try {
                 retriever.setDataSource(tempFile.absolutePath)

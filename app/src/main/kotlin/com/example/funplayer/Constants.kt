@@ -33,6 +33,9 @@ internal const val KEY_APP_LANGUAGE = "app_language"
 internal const val TAG_FILE_VERSION = 1
 internal const val THUMBNAIL_WIDTH = 320
 internal const val THUMBNAIL_HEIGHT = 180
+// 对于元数据提取（时长、封面），只需要下载视频头部即可
+internal const val SMB_METADATA_COPY_LIMIT = 3L * 1024 * 1024 // 3MB 足够获取元数据
+// 保留更大的限制给其他用途（如果有的话）
 internal const val SMB_TEMP_COPY_LIMIT = 20L * 1024 * 1024
 internal const val MAX_VISIBLE_TAGS_IN_ROW = 6
 internal const val TAG_KEY_ALL = "all"

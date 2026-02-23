@@ -127,7 +127,12 @@ internal fun buildAxisCommandFromScript(
     val ranges = defaultRanges + savedRanges
     val sb = StringBuilder()
     for ((index, axis) in script.axes.withIndex()) {
-        val next = axis.actions.firstOrNull { it.at >= currentPositionMs } ?: continue
+        // 使用二分查找替代线性遍历，大幅提升性能
+        val next = axis.actions.binarySearchBy(currentPositionMs, selector = { it.at })
+            .let { if (it < 0) -(it + 1) else it }
+            .let { if (it < axis.actions.size) axis.actions[it] else null }
+            ?: continue
+
         val (minR, maxR) = ranges[axis.id] ?: (0f to 100f)
         val posClamped = next.pos.coerceIn(0, 100)
         val t = posClamped / 100f
@@ -148,7 +153,12 @@ internal fun getAxisPositionAndDurationForHandy(
 ): Pair<Double, Long>? {
     if (script == null) return null
     val axis = script.axes.find { it.id == axisId } ?: return null
-    val next = axis.actions.firstOrNull { it.at >= currentPositionMs } ?: return null
+    // 使用二分查找替代线性遍历
+    val next = axis.actions.binarySearchBy(currentPositionMs, selector = { it.at })
+        .let { if (it < 0) -(it + 1) else it }
+        .let { if (it < axis.actions.size) axis.actions[it] else null }
+        ?: return null
+
     val ranges = getAxisRanges(context)
     val (minR, maxR) = ranges[axisId] ?: (0f to 100f)
     val posClamped = next.pos.coerceIn(0, 100)

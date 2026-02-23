@@ -62,7 +62,7 @@ cd DoroPlayer
 # 构建 Debug 包
 ./gradlew assembleDebug
 ```
-
+·
 在 Android Studio 中打开项目，连接设备或启动模拟器后点击 Run 即可安装运行。首次使用需在应用内选择视频库目录（或配置 NAS）并授予所需权限（存储、蓝牙等按连接方式而定）。
 
 ## 项目结构

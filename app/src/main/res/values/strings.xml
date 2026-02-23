@@ -123,6 +123,13 @@
     <string name="nas_scan_folder">扫描文件夹</string>
     <string name="nas_scan_done_format">扫描完成，共 %d 个视频</string>
     <string name="rescan">重新扫描</string>
+    <string name="nas_discovery">搜索 SMB 服务器</string>
+    <string name="nas_discovering">正在搜索 SMB 服务器…</string>
+    <string name="nas_discovery_failed">搜索失败，请确保连接到同一网络</string>
+    <string name="nas_no_devices_found">未发现 SMB 服务器</string>
+    <string name="nas_devices_found_format">发现 %d 个 SMB 服务器</string>
+    <string name="nas_select_device">选择服务器</string>
+    <string name="nas_device_info">%1$s - %2$s</string>
     <string name="player_settings">播放器设置</string>
     <string name="default_play_behavior">默认播放行为</string>
     <string name="play_stop_example">播放完停止（示例）</string>

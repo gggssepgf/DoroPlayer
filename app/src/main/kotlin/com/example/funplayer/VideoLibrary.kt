@@ -65,7 +65,11 @@ internal suspend fun collectVideosFromSmb(
     val pathPart = if (path.isEmpty()) "" else "$path/"
     val baseUrl = buildSmbBaseUrl(host, share, user, password, port, pathPart)
     var id = 0
-    fun walk(dirUrl: String) {
+    // BFS: 使用队列遍历目录
+    val queue = ArrayDeque<String>()
+    queue.add(baseUrl)
+    while (queue.isNotEmpty()) {
+        val dirUrl = queue.removeFirst()
         runCatching {
             val smbDir = SmbFile(dirUrl)
             if (!smbDir.exists() || !smbDir.isDirectory()) return@runCatching
@@ -73,9 +77,11 @@ internal suspend fun collectVideosFromSmb(
                 val name = file.name ?: return@forEach
                 if (name.equals(".", true) || name.equals("..", true)) return@forEach
                 if (file.isDirectory()) {
+                    // BFS: 将子目录加入队列末尾
                     val base = dirUrl.trimEnd('/')
                     val childUrl = "$base/$name/"
-                    walk(childUrl)
+                    DevLog.log("SMB Walk", "enqueue: $childUrl")
+                    queue.add(childUrl)
                 } else {
                     val ext = name.substringAfterLast('.', "").lowercase()
                     if (ext in VIDEO_EXTENSIONS) {
@@ -115,7 +121,6 @@ internal suspend fun collectVideosFromSmb(
             }
         }
     }
-    walk(baseUrl)
     val savedTags = loadAllTags(context)
     list.map { item ->
         val tags = item.tagFileUri?.let { loadTagsFromSmbTagFile(it) } ?: savedTags[item.uri] ?: emptyList()
@@ -136,6 +141,23 @@ internal fun loadTagsFromSmbTagFile(smbTagUri: String): List<String>? {
         }
     } catch (_: Exception) {
         null
+    }
+}
+
+internal fun saveTagsToSmbTagFile(smbTagUri: String, tags: List<String>): Boolean {
+    return try {
+        val smbFile = SmbFile(smbTagUri)
+        // 如果文件不存在，创建新文件
+        if (!smbFile.exists()) {
+            smbFile.createNewFile()
+        }
+        val root = JSONObject().put("version", TAG_FILE_VERSION).put("tags", JSONArray(tags))
+        smbFile.outputStream.use { stream ->
+            stream.writer(Charsets.UTF_8).write(root.toString())
+        }
+        true
+    } catch (_: Exception) {
+        false
     }
 }
 
@@ -201,19 +223,34 @@ internal fun loadAllTags(context: android.content.Context): Map<String, List<Str
 
 internal fun saveTagsForVideo(context: android.content.Context, video: VideoItem, tags: List<String>) {
     val uri = video.uri ?: return
+    // 判断是否为 SMB URI
+    val isSmbUri = uri.startsWith("smb://")
+
     val tagFileUriToUse = video.tagFileUri ?: run {
-        val parentUri = video.parentFolderUri ?: return@run null
-        val baseName = video.name.substringBeforeLast(".")
-        val parent = DocumentFile.fromTreeUri(context, android.net.Uri.parse(parentUri)) ?: return@run null
-        val existing = parent.findFile("$baseName.tag")
-        if (existing != null) existing.uri.toString()
-        else {
-            val created = parent.createFile("application/octet-stream", "$baseName.tag") ?: return@run null
-            created.uri.toString()
+        if (isSmbUri) {
+            // SMB: 构建 tag 文件 URI
+            val parentUri = video.parentFolderUri ?: return@run null
+            val baseName = video.name.substringBeforeLast(".")
+            "$parentUri$baseName.tag"
+        } else {
+            // 本地 SAF: 使用 DocumentFile 创建
+            val parentUri = video.parentFolderUri ?: return@run null
+            val baseName = video.name.substringBeforeLast(".")
+            val parent = DocumentFile.fromTreeUri(context, android.net.Uri.parse(parentUri)) ?: return@run null
+            val existing = parent.findFile("$baseName.tag")
+            if (existing != null) existing.uri.toString()
+            else {
+                val created = parent.createFile("application/octet-stream", "$baseName.tag") ?: return@run null
+                created.uri.toString()
+            }
         }
     }
     if (tagFileUriToUse != null) {
-        saveTagsToTagFile(context, tagFileUriToUse, tags)
+        if (isSmbUri) {
+            saveTagsToSmbTagFile(tagFileUriToUse, tags)
+        } else {
+            saveTagsToTagFile(context, tagFileUriToUse, tags)
+        }
     }
     val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
     val current = loadAllTags(context).toMutableMap()
